@@ -1,0 +1,392 @@
+---
+title: "Example 1 - head to head comparison"
+output: html_notebook
+---
+
+Impact Evaluations and in particular randomized controlled trials have increasingly gained prominence in the field of development economics. In our paper "From What Works to Specific Decisions," we argue that Bayesian analysis is often more appropriate than a frequentist analysis when the primary audience of an evaluation is a specific decision-maker. 
+
+In this notebook, we provide code for the first example in the working paper. In that example, a policyaker must decide between two programs which seek to increase income of farming households and conducts a randomized controlled trial to test which of the programmes is more effective. 
+
+To view the other examples from the working paper as well as instructions on how to get started with Stan and RStan click [here](https://github.com/dougj892/ie4dfes).
+
+## NOTE TF: NEED TO UPDATE THIS LINK! 
+
+## Step 0 - Set-up 
+## ############################################################
+
+```{r}
+rm(list=ls()) # clear current environment
+
+# Working directory
+main_path="C:/Users/tofis/Dropbox (IDinsight)/IE Design for DFEs/Code" # working directory, specify your path here. 
+library(fs) # use of path()
+outpath = path(main_path,"03_Output") # define output path folder,make sure sub-folder exists
+
+
+# Load packages 
+
+library(rstan)
+# Stan Options
+rstan_options(auto_write = TRUE)             # avoid recompilation of models
+options(mc.cores = parallel::detectCores()-1)  # parallelize across all CPUs
+Sys.setenv(LOCAL_CPPFLAGS = '-march=native') # improve execution time
+
+library(rstudioapi) # to fit rstan
+
+#install.packages("tidyverse")    
+library("tibble")
+library("tidyverse")    ## load the core tidyverse packages, incl. dplyr
+library(magrittr) 
+library("reshape2")
+library(ggplot2)
+library("ggpubr")
+library(plyr)
+library(bbmle) # for MLE comparison
+
+```
+
+## Step 1 - Data Generating Process 
+## ############################################################
+We first generate fake data which we will use to fit our model. 
+
+```{r}
+# Specify Data Generating Process
+fake_data = function(input){  
+  SEED = input[1]
+  a = input[2] # treatment effect 1 
+  b = input[3] # treatment effect 2 
+  SIGMA = input[4]  # sd of error term/outcome, assume N(0,sigma)
+  n = input[5] # sample size 
+  
+  set.seed(SEED)
+  eps = rnorm(n,mean=0,sd=SIGMA)
+  set.seed(SEED)
+  T2 = rbinom(n,1,0.5) # random draw of treatment status 1 (binary)
+  T1 = 1 - T2 
+  y = a*T1 + b*T2 + eps   # outcome data, assume simple linear and separable 
+  fak_dat = data.frame(y,T2) 
+  return(fak_dat)
+}  
+
+input = c(20200525,2.3,2.35,1,200)
+sim_data = fake_data(input)
+sum_sim_data = sim_data %>% group_by(T2) %>% summarize(mean_t2 = mean(y,na.rm=T),sd_t2 = sd(y,na.rm=T))
+
+stan_data = list(N=input[5],y=sim_data$y,t2=sim_data$T2)
+```
+
+## Step 2 - Specify model in Stan
+We next specify our model in Stan and save this as an R string. The Stan code below encodes the following likelihood and priors.
+
+$$ y_i \sim N(\alpha+\theta t_{2i},\sigma_y^2) $$
+$$ p(\alpha)\sim N(0,10); p(\theta)\sim N(0,10); p(\sigma) \sim Uniform(0,100) $$
+
+
+```{r}
+# Create Stan model as a string 
+stan_model_string <- "
+data {
+  int<lower=0> N;  // number of observations
+  vector[N] y;       // outcome variable
+  vector[N] t2;
+}
+parameters {
+  // note that since we don't specify any priors Stan uses a uniform prior.
+  // In the case of sigma, since we specify a lower bound, the uniform prior is over (0, infinity)
+  real alpha;
+  real theta;
+  real <lower=0, upper=100> sigma;
+}
+
+model {
+  alpha~normal(0,10);
+  theta~normal(0,10);
+  y ~ normal(alpha + theta*t2,sigma);
+}
+"
+```
+
+
+
+## Step 3 - Fit the model in Stan
+
+```{r}
+# fit the model to the data, and extract the posterior draws from the fit object
+fit <- stan(model_code = stan_model_string, data = stan_data, iter = 5000, chains = 4, refresh = 0)
+extracted_values <- rstan::extract(fit, permute = TRUE)
+
+```
+
+## Step 4 - Examine output and test for convergence
+Before using the Stan output, it is useful to check that Stan "converged" -- i.e. that the algorithm was successful in approximating the posterior. One useful way to do that is to make sure that the $$\hat R$$ values reported for each parameter after a call to print(fit) are less than 1.1 and, ideally, right around 1.
+
+```{r}
+
+# Print a summary table of the fit
+# Rhat should be close to 1 if Stan was able to successfully converge. 
+print(fit)
+
+# Print a traceplot of each parameter (useful for checking whether samples are autocorrelated and chains mixed well)
+# Note that the shinystan package provides a lot more graphs.
+traceplot(fit,  pars = c("alpha" ,"theta"))
+
+# Print a forest plot of all parameters
+plot(fit)
+
+
+# Plot Posterior Density graphs 
+
+th <- ggplot(data.frame(extracted_values$theta), aes(x=extracted_values$theta)) + xlab("Parameter Value") +
+      geom_density()  + theme_classic() + theme(legend.position="bottom") + 
+      scale_fill_grey() + scale_color_grey() + 
+      geom_vline(xintercept = c(0,mean(extracted_values$theta)), linetype="dashed") + 
+      geom_text(aes(x=0, label= 0, y=0.8), angle=90, vjust = 1, text=element_text(size=9)) +
+      geom_text(aes(x=mean(extracted_values$theta), label= round(mean(extracted_values$theta),2), y=0.8), angle=90, vjust = 1, text=element_text(size=9))
+
+th
+ggsave(file.path(outpath, "example 1 - theta posterior.png"), th)
+
+# Density graph of a, a+theta
+atheta = tibble(c(extracted_values$theta + extracted_values$alpha))
+alpha = tibble(c(extracted_values$alpha))
+atheta$variable = c("Alpha + Theta")
+colnames(atheta) = c("value","variable")
+alpha$variable = c("Alpha")
+colnames(alpha) = c("value","variable")
+
+post_df.m = rbind(atheta,alpha)
+mu <- ddply(post_df.m, "variable", summarise, grp.mean=mean(value))
+
+at <- ggplot(post_df.m, aes(x=value, fill=variable)) + geom_density(alpha=0.2) + xlab("Parameter Value") +
+      geom_vline(data=mu, aes(xintercept=grp.mean, color=variable),linetype="dashed") + 
+      geom_text(aes(x=mu[1,2], label= round(mu[1,2],2), y=0.8), angle=90, vjust = 1, text=element_text(size=9)) +
+      geom_text(aes(x=mu[2,2], label= round(mu[2,2],2), y=0.8), angle=90, vjust = 1, text=element_text(size=9)) +
+      theme_classic() + theme(legend.position = "right") +  scale_color_grey() + scale_fill_grey() 
+
+at
+ggsave(file.path(outpath, "example 1 - alpha_atheta posterior.png"), at)
+
+# mix into one graph 
+combined <- ggarrange(at,th,labels = c("A", "B"), ncol = 2, nrow = 1)
+combined
+ggsave(file.path(outpath, "example 1 - combined.png"), combined)
+
+```
+
+
+## Step 5 - Test model fit using a test quantity  
+A key step in conducting Bayesian analysis is testing the fit of the model. One obvious way to do this is to perform the analysis using several different priors to test the sensitivity of results to different priors.  
+
+Here we demonstrate another way to test model fit through the use of a "test quantity" (Gelman et al, chapter 6). Broadly, Bayesian test quantities are used to compare actual data to simulated data from the model.  To evaluate model fit using a test quantity, we perform X steps.
+
+1. Define a test quantity 
+2. Calculate the value of the test quantity for the actual data
+3. For each simulated draw from the posterior of the parameters...
+    1. Generate a complete new dataset using these values of the parameters and the likelihood
+    2. Calculate the value of the test quantity on the simulated dataset
+4. calculate the proportion of times the value of the test quantity for the actual data is larger than the value of the test quantity from the simulated datasets.
+
+In contrast to frequentist test statistics, Bayesian test quantities may be functions of parameters themselves. For these example, we choose the following test quantity.   
+
+$$ T(y)=max(y_{iϵc} )-min(y_{iϵc} )+max(y_{iϵt1})-min(y_{iϵt1})+max(y_{iϵt2})-min(y_{iϵt}) $$ 
+There is nothing special about this particular test quantity.  We chose this test quantity because it, hopefully, will show if our likelihood is adequately capturing the tails of our data.  If the test quantity is rejected, we may consider a likelihood model with fatter tails such as a multivariate t distribution.
+
+
+```{r}
+df <- data.frame(y, t1, t2)
+
+# calculate the test quantity for the actual data
+control_y <- y[df$t1 ==0 & df$t2 == 0] 
+t1_y <- y[df$t1 ==1]
+t2_y <- y[df$t2 ==1]
+observed_quantity <- max(control_y)-min(control_y)+max(t1_y)-min(t1_y)+max(t2_y)-min(t2_y)
+print("Value of the test quantity for actual data:")
+print(observed_quantity)
+
+draws <- data.frame(extracted_values)
+
+count <- 0
+for (i in 1:nrow(draws)){
+  # generate simulated data using the sampling distribution
+  alpha_sim <- draws$alpha[i]
+  b1_sim <- draws$beta1[i]
+  b2_sim <- draws$beta2[i]
+  sig_sims <- draws$sigma[i]
+  
+  means <- c(rep(alpha_sim,20), rep(alpha_sim+b1_sim,20), rep(alpha_sim+b2_sim,20))
+  y_sim <- means + rnorm(60, mean = 0, sd = sig_sims)
+  
+  control_y <- y_sim[1:20]
+  t1_y <- y_sim[21:40]
+  t2_y <- y_sim[41:60]
+  
+  test <- max(control_y)-min(control_y)+max(t1_y)-min(t1_y)+max(t2_y)-min(t2_y)
+  if (test > observed_quantity) {
+    count <- count+1
+  }
+}
+
+print("Bayesian p-value is:")
+print(count/nrow(draws))
+
+```
+##
+
+## Step 6 - Perform inference using Stan output
+To estimate the probability that the effect of the second intervention is larger than the first, we calculate the proportion of draws for which the simulated value for beta is greater than zero. Let us assume that the first intervention is much less expensive than the second. The decision-maker therefore prefers implementing the first intervention as long as the probability of it not being much worse than the second is large enough. We formalize this decision rule as: Implement the first intervention if  $Pr(\theta<0.1)>0.7$. In other words, the decision-maker requires a 70% chance of the first program not being more than 0.1 (in log-income terms) worse than the second program. 
+
+```{r}
+print("Probability from Stan model that theta >0")
+print(mean(extracted_values$theta > 0))
+
+print("Probability from Stan model that theta >-.1")
+print(mean(extracted_values$theta > -0.1))
+
+print("Probability from Stan model that theta <.1")
+print(mean(extracted_values$theta < 0.1))
+
+```
+
+
+## Step 7 - Compare results with OLS & maximum likelihood estimation
+It is useful to compare our results with the results we would have obtained if we naively used the output from maximum likelihood as if it was a posterior. In this case, since our priors were uninformative, the results are nearly identical.
+
+```{r}
+# Fit OLS to the data
+ols_fit <- lm(y ~ T2, data = sim_data)
+summary(ols_fit)
+confint(ols_fit)
+# Fit a maximum likelihood model to the data.  
+
+# Define negative log-likelihood function 
+negLL = function(alpha,theta,sigma,y1=sim_data$y,x1=sim_data$T2){
+  Y.pred = alpha + theta *x1
+  nll = -sum(dnorm(y1,mean=Y.pred,sd=sigma,log=T))
+  return(nll)
+}
+mle2_fit = mle2(negLL,start=list(alpha=0,theta=0,sigma=1))
+summary(mle2_fit)
+profile.mle2_fit <- profile(mle2_fit)
+confint(profile.mle2_fit)m # confidence intervals
+# warnings are b/c negative values for sigma are tried
+
+# Calculate probability theta > 0 by treating output from max likelihood as posterior
+
+print("Probability from max likelihood model that theta >0")
+print(1-pnorm(0, coef(mle2_fit)[2], sqrt(vcov(mle2_fit)[2,2])))
+
+#visual comparison of MLE and Bayesian model 
+bayes_out=summary(fit)$summary
+bayes_out2 = cbind(bayes_out[1:3,c(1,3,4,8)])
+
+mle_se = diag(sqrt(vcov(mle2_fit)))
+mle_coef = coef(mle2_fit)
+mle_ci = confint(mle2_fit)
+mle_out = cbind(mle_coef,mle_se,mle_ci)
+
+out_vis = data.frame(rbind(mle_out,bayes_out2))
+out_vis = out_vis[ order(row.names(out_vis)), ]
+
+```
+
+## Step 8: Informative Priors 
+
+We now illustrate how to incorporate informative priors into the analysis. 
+
+```{r}
+# Scenario 1
+N = 100000
+set.seed(20200720)
+alpha_prior_s1 = rnorm(n=N,mean=2.1,sd=0.5)
+q=quantile(alpha_prior_s1,probs=c(0.1,0.15,0.2,0.25,0.75,0.8,0.85,0.9))
+q
+exp(q[1])
+exp(q[8])
+
+# Scenario 2 
+set.seed(20200720)
+theta_prior_s2 = rnorm(n=N,mean=-0.2,sd=0.3)
+
+print("Prior probability theta >0")
+print((sum(theta_prior_s2>0)/N)*100)
+
+# Scenario 3
+input_s3 = c(20200525,2.3,2.35,1,2000)
+sim_data_s3 = fake_data(input_s3)
+stan_data_s3 = list(N=input_s3[5],y=sim_data_s3$y,t2=sim_data_s3$T2)
+
+
+# Create Stan model as a string 
+stan_model_S1 <- "
+data {
+  int<lower=0> N;  // number of observations
+  vector[N] y;  // outcome variable
+  vector[N] t2;
+}
+parameters {
+  // note that since we don't specify any priors Stan uses a uniform prior.
+  // In the case of sigma, since we specify a lower bound
+  real alpha;
+  real theta;
+  real <lower=0> sigma;
+}
+
+model {
+  alpha~normal(2.1,0.5);
+  theta~normal(0,10);
+  sigma~normal(0.5,2);
+  y ~ normal(alpha + theta*t2,sigma);
+}
+"
+
+stan_model_S2 <- "
+data {
+  int<lower=0> N;  // number of observations
+  vector[N] y;  // outcome variable
+  vector[N] t2;
+}
+parameters {
+  // note that since we don't specify any priors Stan uses a uniform prior.
+  // In the case of sigma, since we specify a lower bound
+  real alpha;
+  real theta;
+  real <lower=0> sigma;
+}
+
+model {
+  alpha~normal(2.4,0.5);
+  theta~normal(-0.2,0.1);
+  sigma~normal(0.5,2);
+  y ~ normal(alpha + theta*t2,sigma);
+}
+"
+# fit scenarios to the data, and extract the posterior draws from the fit object
+fit_s1 <- stan(model_code = stan_model_S1, data = stan_data, iter = 5000, chains = 4, refresh = 0)
+extracted_values_s1 <- rstan::extract(fit_s1, permute = TRUE)
+
+fit_s1
+print("Probability from Scenario 1: theta >0")
+print(mean(extracted_values_s1$theta > 0))
+
+fit_s2 <- stan(model_code = stan_model_S2, data = stan_data, iter = 5000, chains = 4, refresh = 0)
+extracted_values_s2 <- rstan::extract(fit_s2, permute = TRUE)
+
+fit_s2
+print("Probability from Scenario 2: theta >0")
+print(mean(extracted_values_s2$theta > 0))
+
+fit_s3 <- stan(model_code = stan_model_S2, data = stan_data_s3, iter = 5000, chains = 4, refresh = 0)
+extracted_values_s3 <- rstan::extract(fit_s3, permute = TRUE)
+
+fit_s3
+print("Probability from Scenario 3: theta >0")
+print(mean(extracted_values_s3$theta > 0))
+
+
+
+fit
+print("Probability from base scenario: theta >0")
+print(mean(extracted_values$theta > 0))
+
+```
+

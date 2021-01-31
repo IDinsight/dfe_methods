@@ -1,0 +1,127 @@
+##################################################
+## Description: Fit Bayesian model for "comparing to a benchmark" and "testing for non-inferiority"
+## Author: Doug Johnson, Torben Fischer
+##################################################
+
+## Step 0: Set-up
+
+```{r}
+rm(list=ls()) # clear current environment
+
+# Working directory
+main_path="C:/Users/tofis/Dropbox (IDinsight)/IE Design for DFEs/Code" # working directory, specify your path here. 
+library(fs) # use of path()
+outpath = path(main_path,"03_Output") # define output path folder,make sure sub-folder exists
+
+
+# Load packages 
+
+library(rstan)
+# Stan Options
+rstan_options(auto_write = TRUE)             # avoid recompilation of models
+options(mc.cores = parallel::detectCores()-1)  # parallelize across all CPUs
+Sys.setenv(LOCAL_CPPFLAGS = '-march=native') # improve execution time
+
+library(rstudioapi) # to fit rstan
+library(ggplot2)
+library("ggpubr")
+
+library("tibble")
+library("tidyverse")    ## load the core tidyverse packages, incl. dplyr
+
+
+```
+
+## Step 1 - Data Generating Process 
+## ############################################################
+We first generate fake data which we will use to fit our model. 
+
+```{r}
+
+# Specify Data Generating Process
+fake_data = function(input){  
+  SEED = input[1]
+  a = input[2] # treatment effect 1 
+  b = input[3] # treatment effect 2 
+  SIGMA = input[4]  # sd of error term/outcome, assume N(0,sigma)
+  n = input[5] # sample size 
+  
+  set.seed(SEED)
+  eps = rnorm(n,mean=0,sd=SIGMA)
+  set.seed(SEED)
+  T2 = rbinom(n,1,0.5) # random draw of treatment status 1 (binary)
+  y = a + b*T2 + eps   # outcome data, assume simple linear and separable 
+  fak_dat = data.frame(y,T2) 
+  return(fak_dat)
+}  
+
+input = c(20200720,-1.2,0.3,1,150)
+sim_data = fake_data(input)
+sum_sim_data = sim_data %>% group_by(T2) %>% dplyr::summarize(mean_t = mean(y,na.rm=T),sd_t2 = sd(y,na.rm=T))
+
+stan_data = list(N=input[5],y=sim_data$y,t2=sim_data$T2)
+
+```
+
+## Step 2 - Specify model in Stan
+## ####################################
+We next specify our model in Stan and save this as an R string. The Stan code below encodes the following likelihood and priors.
+
+$$ y_i \sim N(\alpha+\theta ti,\sigma_y^2=1) $$
+
+# Create string with details of Bayesian model in Stan
+```{r}
+stan_model_string = "
+data {
+  int<lower=0> N;  // number of observations
+  vector[N] y;       // outcome variable
+  vector[N] t2;     // treatment indicator
+}
+parameters {
+  real alpha;
+  real theta;
+}
+model {
+  // priors for alpha and beta. note that the second parameter specifies the std dev not the variance (as in BUGS)
+  alpha ~ normal(-1.7,2); 
+  theta ~ normal(0.1,0.1); 
+  y ~ normal(alpha + theta*t2,1);
+} 
+"
+```
+
+## Step 3 - Fit the model in Stan
+```{r}
+fit <- stan(model_code = stan_model_string, data = stan_data, iter = 10000, chains = 4)
+
+# print the output from the stan function
+print(fit)
+
+# extract the posteriordraws from the fit object
+extracted_values<-rstan::extract(fit, permuted = TRUE)
+theta <- extracted_values$theta
+```
+
+## Step 4 - Examine output and test for convergence
+Before using the Stan output, it is useful to check that Stan "converged" -- i.e. that the algorithm was successful in approximating the posterior. One useful way to do that is to make sure that the $$\hat R$$ values reported for each parameter after a call to print(fit) are less than 1.1 and, ideally, right around 1.
+
+(COULD INSERT MORE CHECKS HERE)
+
+## Step 5 - Perform inference using Stan output
+We estimate the probability that beta is greater than .2 by calculating the % of draws for beta greater than .2
+
+```{r}
+prob_better <- sum(theta >.2)/length(theta)
+print("Probability from Stan model of theta > .2")
+print(prob_better)
+
+prob_pos <- sum(theta >0)/length(theta)
+print("Probability from Stan model of theta > 0")
+print(prob_pos)
+
+# kernel density of posterior for theta
+
+p <- ggplot(data.frame(theta), aes(x=theta)) + geom_density() + geom_vline(aes(xintercept=c(0.2)))
+p
+ggsave(file.path(outpath, "example2_benchmark_theta_post.png"), p)
+```
